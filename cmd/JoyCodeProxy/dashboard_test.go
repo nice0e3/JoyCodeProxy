@@ -3,19 +3,38 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
 
+// freePort asks the kernel for a free open port that is ready for use.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("get free port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
 func TestDashboardEndpoints(t *testing.T) {
 	bin := buildTestBinary(t)
-	port := 34896
+	port := freePort(t)
 
-	// Start server with real HOME (for JoyCode credentials) + skip validation
-	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test")
+	// Use a temp HOME so the server creates a fresh database with no
+	// auth_password_hash — this bypasses JWT middleware without modifying
+	// production code.  Previous tests used the real HOME, which picked up an
+	// existing password hash and caused 401 responses on /api/* endpoints.
+	tmpHome := t.TempDir()
+
+	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test", "--tls=false")
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
@@ -68,9 +87,15 @@ func TestDashboardEndpoints(t *testing.T) {
 			t.Fatalf("list accounts: %v", err)
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
 		var m map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&m)
-		accounts := m["accounts"].([]interface{})
+		accounts, ok := m["accounts"].([]interface{})
+		if !ok {
+			t.Fatalf("response missing 'accounts' array: %v", m)
+		}
 		if len(accounts) < 1 {
 			t.Errorf("accounts len = %d, want >= 1", len(accounts))
 		}
@@ -83,9 +108,15 @@ func TestDashboardEndpoints(t *testing.T) {
 			t.Fatalf("models: %v", err)
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
 		var m map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&m)
-		models := m["models"].([]interface{})
+		models, ok := m["models"].([]interface{})
+		if !ok {
+			t.Fatalf("response missing 'models' array: %v", m)
+		}
 		if len(models) == 0 {
 			t.Error("expected at least 1 model")
 		}
@@ -133,9 +164,11 @@ func TestDashboardEndpoints(t *testing.T) {
 
 func TestStaticFileServing(t *testing.T) {
 	bin := buildTestBinary(t)
-	port := 34897
+	port := freePort(t)
+	tmpHome := t.TempDir()
 
-	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test")
+	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test", "--tls=false")
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Start()
@@ -198,9 +231,11 @@ func TestStaticFileServing(t *testing.T) {
 
 func TestOpenAPIEndpoints(t *testing.T) {
 	bin := buildTestBinary(t)
-	port := 34898
+	port := freePort(t)
+	tmpHome := t.TempDir()
 
-	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test")
+	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test", "--tls=false")
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Start()

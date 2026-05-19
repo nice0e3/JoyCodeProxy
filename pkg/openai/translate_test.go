@@ -373,27 +373,27 @@ func TestTranslateStreamChunk_Object(t *testing.T) {
 	}
 }
 
-// --- DefaultModel tests ---
+// --- ResolveModel tests ---
 
 // Test 24: Empty returns JoyAI-Code
-func TestDefaultModel_Empty(t *testing.T) {
-	result := DefaultModel("")
+func TestResolveModel_Empty(t *testing.T) {
+	result := ResolveModel("", "", "")
 	if result != joycode.DefaultModel {
 		t.Errorf("expected %s, got %s", joycode.DefaultModel, result)
 	}
 }
 
 // Test 25: Non-empty returns input
-func TestDefaultModel_NonEmpty(t *testing.T) {
-	result := DefaultModel("GLM-5.1")
+func TestResolveModel_NonEmpty(t *testing.T) {
+	result := ResolveModel("GLM-5.1", "", "")
 	if result != "GLM-5.1" {
 		t.Errorf("expected GLM-5.1, got %s", result)
 	}
 }
 
 // Test 26: Specific model name preserved
-func TestDefaultModel_SpecificName(t *testing.T) {
-	result := DefaultModel("Kimi-K2.6")
+func TestResolveModel_SpecificName(t *testing.T) {
+	result := ResolveModel("Kimi-K2.6", "", "")
 	if result != "Kimi-K2.6" {
 		t.Errorf("expected Kimi-K2.6, got %s", result)
 	}

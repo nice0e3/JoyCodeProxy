@@ -175,9 +175,37 @@ func (h *Handler) handleErrors(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"errors": logs, "total": len(logs)})
 }
 
+// knownAPISet lists OpenAI/Anthropic-style endpoint paths that users
+// commonly hit without the /v1/ prefix. When these paths arrive at the
+// SPA catch-all we return a JSON 404 with a helpful hint instead of HTML.
+var knownAPISet = map[string]bool{
+	"/chat/completions":      true,
+	"/completions":           true,
+	"/messages":              true,
+	"/models":                true,
+	"/embeddings":            true,
+	"/web-search":            true,
+	"/rerank":                true,
+	"/images/generations":    true,
+	"/audio/transcriptions":  true,
+	"/audio/translations":    true,
+}
+
 // ServeStatic serves the SPA frontend for non-API routes.
 func (h *Handler) ServeStatic(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+
+	// Intercept known API paths that are missing the /v1/ prefix.
+	// Return a structured JSON 404 so SDKs get a clear error instead of HTML.
+	if knownAPISet[path] {
+		writeJSON(w, http.StatusNotFound, map[string]interface{}{
+			"error": map[string]string{
+				"type":    "invalid_request_error",
+				"message": fmt.Sprintf("%s %s not found. JoyCodeProxy serves the API under /v1/. Set base_url to http://<host>:<port>/v1", r.Method, path),
+			},
+		})
+		return
+	}
 
 	// Handle JoyCode OAuth callback on root path: /?pt_key=xxx
 	if path == "/" && r.URL.Query().Get("pt_key") != "" {

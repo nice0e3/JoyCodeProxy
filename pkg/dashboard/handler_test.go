@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"testing"
 
+	"github.com/vibe-coding-labs/JoyCodeProxy/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCodeProxy/pkg/store"
 )
 
@@ -31,7 +33,8 @@ func setupTestHandler(t *testing.T) (*Handler, *store.Store) {
 	os.WriteFile(filepath.Join(staticDir, "assets", "test.js"), []byte("console.log(1)"), 0644)
 
 	subFS := os.DirFS(staticDir)
-	h := NewHandler(s, subFS)
+	k := keepalive.NewKeeper(s, time.Hour)
+	h := NewHandler(s, subFS, k)
 	return h, s
 }
 
@@ -133,9 +136,9 @@ func TestHandleAddAndListAccounts(t *testing.T) {
 
 	// Add account
 	req := makeRequest(t, "POST", "/api/accounts", map[string]interface{}{
-		"api_key": "test-key",
-		"pt_key":  "test-pt",
 		"user_id": "test-user",
+		"pt_key":  "test-pt",
+		"nickname": "TestNick",
 	})
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -159,8 +162,11 @@ func TestHandleAddAndListAccounts(t *testing.T) {
 		t.Fatalf("accounts len = %d, want 1", len(accounts))
 	}
 	acc := accounts[0].(map[string]interface{})
-	if acc["api_key"] != "test-key" {
-		t.Errorf("api_key = %v, want test-key", acc["api_key"])
+	if acc["user_id"] != "test-user" {
+		t.Errorf("user_id = %v, want test-user", acc["user_id"])
+	}
+	if acc["nickname"] != "TestNick" {
+		t.Errorf("nickname = %v, want TestNick", acc["nickname"])
 	}
 }
 
@@ -479,3 +485,124 @@ func TestMethodNotAllowed(t *testing.T) {
 // --- Interface check ---
 
 var _ fs.FS = (os.DirFS(""))
+
+// --- SPA catch-all API path interception ---
+
+func TestServeStaticAPIPathReturnsJSON404(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	paths := []string{
+		"/chat/completions",
+		"/completions",
+		"/messages",
+		"/models",
+		"/embeddings",
+		"/web-search",
+		"/rerank",
+		"/images/generations",
+		"/audio/transcriptions",
+		"/audio/translations",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest("POST", path, nil)
+			w := httptest.NewRecorder()
+			h.ServeStatic(w, req)
+
+			if w.Code != 404 {
+				t.Errorf("status = %d, want 404 for %s", w.Code, path)
+			}
+
+			ct := w.Header().Get("Content-Type")
+			if !strings.Contains(ct, "application/json") {
+				t.Errorf("Content-Type = %q, want application/json for %s", ct, path)
+			}
+
+			var resp map[string]interface{}
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode json for %s: %v, body: %s", path, err, w.Body.String())
+			}
+			errObj, ok := resp["error"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("no error object for %s: %v", path, resp)
+			}
+			msg, _ := errObj["message"].(string)
+			if !strings.Contains(msg, "/v1/") {
+				t.Errorf("error message should mention /v1/ for %s, got: %s", path, msg)
+			}
+		})
+	}
+}
+
+func TestServeStaticAPIPathGETAlsoReturns404(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	req := httptest.NewRequest("GET", "/chat/completions", nil)
+	w := httptest.NewRecorder()
+	h.ServeStatic(w, req)
+
+	if w.Code != 404 {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errObj := resp["error"].(map[string]interface{})
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "GET") {
+		t.Errorf("error message should include GET method, got: %s", msg)
+	}
+}
+
+func TestServeStaticNonAPIPathStillFallsThrough(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	// These paths are NOT in knownAPISet, should get SPA fallback
+	paths := []string{"/accounts", "/settings", "/some-random-page", "/dashboard"}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest("GET", path, nil)
+			w := httptest.NewRecorder()
+			h.ServeStatic(w, req)
+
+			if w.Code != 200 {
+				t.Errorf("status = %d, want 200 (SPA fallback) for %s", w.Code, path)
+			}
+			body := w.Body.String()
+			if !strings.Contains(body, "test") {
+				t.Errorf("expected SPA fallback HTML for %s, got: %s", path, body)
+			}
+		})
+	}
+}
+
+func TestServeStaticRootPathStillWorks(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeStatic(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "test") {
+		t.Errorf("root path should serve index.html, got: %s", w.Body.String())
+	}
+}
+
+func TestServeStaticAssetStillWorksAfterAPICheck(t *testing.T) {
+	h, _ := setupTestHandler(t)
+
+	req := httptest.NewRequest("GET", "/assets/test.js", nil)
+	w := httptest.NewRecorder()
+	h.ServeStatic(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "console.log") {
+		t.Errorf("asset should still be served, got: %s", w.Body.String())
+	}
+}

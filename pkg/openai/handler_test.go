@@ -5,11 +5,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/vibe-coding-labs/JoyCodeProxy/pkg/joycode"
+	"github.com/vibe-coding-labs/JoyCodeProxy/pkg/store"
 )
 
 // --- Mock infrastructure ---
@@ -63,6 +66,27 @@ func newMockClient(ts *httptest.Server) *joycode.Client {
 	return c
 }
 
+// newTempStore creates a store backed by a temporary database.
+// The caller should call the returned cleanup function (which removes the
+// temp directory) when done.
+func newTempStore() (*store.Store, func(), error) {
+	dir, err := os.MkdirTemp("", "joycode-test-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	dbPath := filepath.Join(dir, "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, nil, err
+	}
+	cleanup := func() {
+		s.Close()
+		os.RemoveAll(dir)
+	}
+	return s, cleanup, nil
+}
+
 // setupOpenAIServer creates a fully wired openai.Server backed by a mock
 // JoyCode API. Returns the HTTP test server for the OpenAI API, and a
 // cleanup function.
@@ -71,7 +95,12 @@ func setupOpenAIServer(responses map[string]interface{}) (*httptest.Server, func
 	backend := httptest.NewServer(mockHandler(responses))
 	client := newMockClient(backend)
 
-	srv := NewServer(client)
+	st, storeCleanup, err := newTempStore()
+	if err != nil {
+		backend.Close()
+		panic("newTempStore: " + err.Error())
+	}
+	srv := NewServer(client, st)
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
 	frontend := httptest.NewServer(mux)
@@ -79,6 +108,7 @@ func setupOpenAIServer(responses map[string]interface{}) (*httptest.Server, func
 	cleanup := func() {
 		frontend.Close()
 		backend.Close()
+		storeCleanup()
 	}
 	return frontend, cleanup
 }
@@ -175,7 +205,12 @@ func TestModels_ServerError(t *testing.T) {
 	defer errorBackend.Close()
 
 	client := newMockClient(errorBackend)
-	srv := NewServer(client)
+	st, storeCleanup, err := newTempStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeCleanup()
+	srv := NewServer(client, st)
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
 	frontend := httptest.NewServer(mux)

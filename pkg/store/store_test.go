@@ -123,11 +123,11 @@ func TestAddAndListAccounts(t *testing.T) {
 	if len(accounts) != 1 {
 		t.Fatalf("len = %d, want 1", len(accounts))
 	}
-	if accounts[0].APIKey != "key1" {
-		t.Errorf("APIKey = %q, want %q", accounts[0].APIKey, "key1")
+	if accounts[0].UserID != "key1" {
+		t.Errorf("UserID = %q, want %q", accounts[0].UserID, "key1")
 	}
-	if accounts[0].UserID != "user1" {
-		t.Errorf("UserID = %q, want %q", accounts[0].UserID, "user1")
+	if accounts[0].Nickname != "user1" {
+		t.Errorf("Nickname = %q, want %q", accounts[0].Nickname, "user1")
 	}
 	if !accounts[0].IsDefault {
 		t.Error("expected IsDefault = true")
@@ -184,8 +184,8 @@ func TestAddAccountOverwrites(t *testing.T) {
 	}
 
 	a, _ := s.GetAccount("key1")
-	if a.UserID != "user1-new" {
-		t.Errorf("UserID = %q, want %q", a.UserID, "user1-new")
+	if a.PtKey != "pt1-updated" {
+		t.Errorf("PtKey = %q, want %q", a.PtKey, "pt1-updated")
 	}
 }
 
@@ -204,8 +204,8 @@ func TestGetAccount(t *testing.T) {
 	if a.PtKey != "secret-pt-key" {
 		t.Errorf("PtKey = %q, want %q", a.PtKey, "secret-pt-key")
 	}
-	if a.APIKey != "key1" {
-		t.Errorf("APIKey = %q, want %q", a.APIKey, "key1")
+	if a.UserID != "key1" {
+		t.Errorf("UserID = %q, want %q", a.UserID, "key1")
 	}
 }
 
@@ -252,10 +252,10 @@ func TestSetDefault(t *testing.T) {
 
 	accounts, _ := s.ListAccounts()
 	for _, a := range accounts {
-		if a.APIKey == "key1" && a.IsDefault {
+		if a.UserID == "key1" && a.IsDefault {
 			t.Error("key1 should no longer be default")
 		}
-		if a.APIKey == "key2" && !a.IsDefault {
+		if a.UserID == "key2" && !a.IsDefault {
 			t.Error("key2 should be default")
 		}
 	}
@@ -286,8 +286,8 @@ func TestGetDefaultAccount(t *testing.T) {
 	if a == nil {
 		t.Fatal("expected default account, got nil")
 	}
-	if a.APIKey != "key2" {
-		t.Errorf("default APIKey = %q, want %q", a.APIKey, "key2")
+	if a.UserID != "key2" {
+		t.Errorf("default UserID = %q, want %q", a.UserID, "key2")
 	}
 }
 
@@ -383,7 +383,7 @@ func TestLogRequestAndGetStats(t *testing.T) {
 	if len(stats.ByModel) != 2 {
 		t.Errorf("ByModel len = %d, want 2", len(stats.ByModel))
 	}
-	if len(stats.ByAccount) != 1 || stats.ByAccount[0].APIKey != "其他" {
+	if len(stats.ByAccount) != 1 || stats.ByAccount[0].UserID != "其他" {
 		t.Errorf("ByAccount = %v, want [{其他 3}]", stats.ByAccount)
 	}
 }

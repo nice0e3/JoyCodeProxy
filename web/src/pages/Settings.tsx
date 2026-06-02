@@ -109,18 +109,6 @@ const FIELD_GROUPS = [
       },
     ],
   },
-  {
-    title: 'OAuth 登录',
-    fields: [
-      {
-        key: 'oauth_callback_host',
-        label: 'OAuth 回调域名',
-        tooltip: 'OAuth 授权登录后 JoyCode 回调的目标域名。默认为空（使用 127.0.0.1）。远程部署时设置为代理服务器的公网域名，如 myserver.example.com',
-        placeholder: '留空则使用 127.0.0.1（本地部署无需填写）',
-        type: 'input' as const,
-      },
-    ],
-  },
 ];
 
 const SettingsPage: React.FC = () => {

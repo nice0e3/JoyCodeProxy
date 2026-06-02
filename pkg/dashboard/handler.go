@@ -753,18 +753,12 @@ func (h *Handler) handleBrowserLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	token := hex.EncodeToString(b)
 
-	// Build login URL with optional custom callback host
-	callbackHost := h.store.GetSetting("oauth_callback_host")
 	loginURL := fmt.Sprintf(
 		"https://joycode.jd.com/login/?ideAppName=JoyCode&fromIde=ide&redirect=0&authPort=%s&authKey=%s",
 		url.QueryEscape(port), url.QueryEscape(token),
 	)
-	if callbackHost != "" {
-		loginURL += "&authHost=" + url.QueryEscape(callbackHost)
-		slog.Info("browser-login: using custom callback host", "host", callbackHost, "port", port, "token", token)
-	} else {
-		slog.Info("browser-login: generated login URL", "port", port, "token", token)
-	}
+
+	slog.Info("browser-login: generated login URL", "port", port, "token", token)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":    true,

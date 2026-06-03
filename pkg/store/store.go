@@ -528,6 +528,40 @@ func (s *Store) AddAccount(userID, ptKey, nickname string, isDefault bool, defau
 		return nil
 	}
 
+		// Check if another account already has the same pt_key (dedup by credential)
+		rows, err := s.db.Query("SELECT user_id, pt_key FROM accounts")
+		if err == nil {
+			for rows.Next() {
+				var existingUserID, encExistingPtKey string
+				if rows.Scan(&existingUserID, &encExistingPtKey) != nil {
+					continue
+				}
+				existingPtKey, decErr := s.decrypt(encExistingPtKey)
+				if decErr != nil {
+					continue
+				}
+				if existingPtKey == ptKey {
+					rows.Close()
+					encPtKey, encErr := s.encrypt(ptKey)
+					if encErr != nil {
+						slog.Error("store: encrypt pt_key failed", "user_id", userID, "error", encErr)
+						return fmt.Errorf("encrypt pt_key: %w", encErr)
+					}
+					_, err = s.db.Exec(
+						"UPDATE accounts SET user_id = ?, pt_key = ?, nickname = CASE WHEN nickname = '' OR nickname IS NULL THEN ? ELSE nickname END, updated_at = datetime('now', 'localtime') WHERE user_id = ?",
+						userID, encPtKey, nickname, existingUserID,
+					)
+					if err != nil {
+						slog.Error("store: update account (pt_key dedup) failed", "old_user_id", existingUserID, "new_user_id", userID, "error", err)
+						return err
+					}
+					slog.Info("store: merged account by pt_key dedup", "old_user_id", existingUserID, "new_user_id", userID)
+					return nil
+				}
+			}
+			rows.Close()
+		}
+
 	// New account — enforce limit
 	var count int
 	s.db.QueryRow("SELECT COUNT(*) FROM accounts").Scan(&count)

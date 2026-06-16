@@ -1,6 +1,13 @@
+# 构建时可通过 --build-arg ALPINE_MIRROR=<base-url> 切换 Alpine 包源，
+# 解决部分网络环境下无法连接 dl-cdn.alpinelinux.org 导致 apk 失败的问题。
+# 国内示例：--build-arg ALPINE_MIRROR=https://mirrors.aliyun.com/alpine
+ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
+
 FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache gcc musl-dev
+ARG ALPINE_MIRROR
+RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories \
+    && apk add --no-cache gcc musl-dev
 
 WORKDIR /app
 
@@ -12,7 +19,9 @@ RUN CGO_ENABLED=1 go build -ldflags "-s -w" -o /JoyCodeProxy ./cmd/JoyCodeProxy
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates
+ARG ALPINE_MIRROR
+RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories \
+    && apk add --no-cache ca-certificates
 
 COPY --from=builder /JoyCodeProxy /usr/local/bin/JoyCodeProxy
 

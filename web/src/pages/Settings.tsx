@@ -122,7 +122,20 @@ const SettingsPage: React.FC = () => {
     setLoading(true);
     try {
       const data = await api.getSettings();
-      form.setFieldsValue(data);
+      // 后端设置统一存为字符串。switch 字段需转回布尔再回填表单，
+      // 否则存着的 "false"（字符串）会被当成 truthy 而显示成「开」，
+      // 误导用户。判定与后端一致：!= "false" 即视为开启。
+      const switchKeys: string[] = [];
+      for (const group of FIELD_GROUPS) {
+        for (const field of group.fields) {
+          if (field.type === 'switch') switchKeys.push(field.key);
+        }
+      }
+      const normalized: Record<string, unknown> = { ...data };
+      for (const key of switchKeys) {
+        normalized[key] = data[key] !== 'false';
+      }
+      form.setFieldsValue(normalized);
     } catch (e: unknown) {
       message.error(e instanceof Error ? e.message : '加载设置失败');
     } finally {
@@ -136,7 +149,7 @@ const SettingsPage: React.FC = () => {
     setSaving(true);
     try {
       const payload = Object.fromEntries(
-        Object.entries(values).map(([key, value]) => [key, String(value)])
+        Object.entries(values).map(([key, value]) => [key, value == null ? '' : String(value)])
       );
       await api.updateSettings(payload);
       message.success('设置已保存');

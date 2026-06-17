@@ -31,4 +31,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD wget -qO- http://localhost:34891/health || exit 1
 
 ENTRYPOINT ["JoyCodeProxy"]
-CMD ["serve"]
+CMD ["serve", "--skip-validation"]

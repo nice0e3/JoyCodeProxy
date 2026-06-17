@@ -41,9 +41,11 @@ func (rt redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 // mockHandler returns an http.Handler that serves canned JoyCode API responses.
+// It matches requests by the functionId query parameter (color gateway style).
 func mockHandler(responses map[string]interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp, ok := responses[r.URL.Path]
+		functionID := r.URL.Query().Get("functionId")
+		resp, ok := responses[functionID]
 		if !ok {
 			w.WriteHeader(404)
 			return
@@ -167,7 +169,7 @@ func TestModels_Get(t *testing.T) {
 		},
 	}
 	srv, cleanup := setupOpenAIServer(map[string]interface{}{
-		"/api/saas/models/v1/modelList": modelListResp,
+		joycode.FnModelList: modelListResp,
 	})
 	defer cleanup()
 
@@ -294,7 +296,7 @@ func TestChat_ValidNonStream(t *testing.T) {
 		},
 	}
 	srv, cleanup := setupOpenAIServer(map[string]interface{}{
-		"/api/saas/openai/v1/chat/completions": chatResp,
+		joycode.FnChatComplete: chatResp,
 	})
 	defer cleanup()
 
@@ -391,7 +393,7 @@ func TestWebSearch_Valid(t *testing.T) {
 		},
 	}
 	srv, cleanup := setupOpenAIServer(map[string]interface{}{
-		"/api/saas/openai/v1/web-search": searchResp,
+		joycode.FnWebSearch: searchResp,
 	})
 	defer cleanup()
 
@@ -481,7 +483,7 @@ func TestRerank_Valid(t *testing.T) {
 		},
 	}
 	srv, cleanup := setupOpenAIServer(map[string]interface{}{
-		"/api/saas/openai/v1/rerank": rerankResp,
+		joycode.FnRerank: rerankResp,
 	})
 	defer cleanup()
 

@@ -3,6 +3,9 @@ package joycode
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,14 +51,22 @@ func (rt redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests for constructors, headers, body preparation, ID generation
+// Unit tests for constructors, headers, ID generation
 // ---------------------------------------------------------------------------
 
-func TestNewClient_SessionIDUnique(t *testing.T) {
-	a := NewClient("k", "u")
-	b := NewClient("k", "u")
-	if a.SessionID == b.SessionID {
-		t.Errorf("two clients should have different session IDs, got same %q", a.SessionID)
+func TestNewClient_DefaultsSet(t *testing.T) {
+	c := NewClient("k", "u")
+	if c.PtKey != "k" {
+		t.Errorf("PtKey = %q, want %q", c.PtKey, "k")
+	}
+	if c.UserID != "u" {
+		t.Errorf("UserID = %q, want %q", c.UserID, "u")
+	}
+	if c.Tenant != "JD" {
+		t.Errorf("Tenant = %q, want %q", c.Tenant, "JD")
+	}
+	if c.httpClient == nil {
+		t.Error("httpClient should be initialised")
 	}
 }
 
@@ -63,9 +74,6 @@ func TestNewClient_EmptyCredentials(t *testing.T) {
 	c := NewClient("", "")
 	if c.PtKey != "" || c.UserID != "" {
 		t.Errorf("expected empty credentials, got PtKey=%q UserID=%q", c.PtKey, c.UserID)
-	}
-	if c.SessionID == "" {
-		t.Error("SessionID should still be generated with empty credentials")
 	}
 	if c.httpClient == nil {
 		t.Error("httpClient should be initialised")
@@ -82,7 +90,6 @@ func TestHeaders_ContainsRequiredFields(t *testing.T) {
 		"User-Agent",
 		"Accept",
 		"Accept-Encoding",
-		"Accept-Language",
 		"Connection",
 	}
 	for _, key := range canonical {
@@ -91,7 +98,7 @@ func TestHeaders_ContainsRequiredFields(t *testing.T) {
 		}
 	}
 	// Non-canonical headers stored via map literal; access directly.
-	nonCanonical := []string{"ptKey", "loginType"}
+	nonCanonical := []string{"ptKey", "loginType", "tenant"}
 	for _, key := range nonCanonical {
 		vals := h[key]
 		if len(vals) == 0 || vals[0] == "" {
@@ -109,65 +116,29 @@ func TestHeaders_PtKeySet(t *testing.T) {
 	}
 }
 
-func TestPrepareBody_DefaultFields(t *testing.T) {
-	c := NewClient("k", "user42")
-	body := c.prepareBody(map[string]interface{}{})
-
-	defaults := map[string]string{
-		"tenant":        "JOYCODE",
-		"userId":        "user42",
-		"client":        "JoyCode",
-		"clientVersion": ClientVersion,
-		"sessionId":     c.SessionID,
-	}
-	for field, want := range defaults {
-		got, _ := body[field].(string)
-		if got != want {
-			t.Errorf("prepareBody()[%q] = %q, want %q", field, got, want)
-		}
+func TestHeaders_LoginType(t *testing.T) {
+	c := NewClient("k", "u")
+	h := c.headers()
+	vals := h["loginType"]
+	if len(vals) == 0 || vals[0] != "PIN_JD_CLOUD" {
+		t.Errorf("loginType = %v, want PIN_JD_CLOUD", vals)
 	}
 }
 
-func TestPrepareBody_ChatIdGenerated(t *testing.T) {
+func TestHeaders_Tenant(t *testing.T) {
 	c := NewClient("k", "u")
-	body := c.prepareBody(map[string]interface{}{})
-	if body["chatId"] == nil || body["chatId"].(string) == "" {
-		t.Error("chatId should be auto-generated when not provided")
+	h := c.headers()
+	vals := h["tenant"]
+	if len(vals) == 0 || vals[0] != "JD" {
+		t.Errorf("tenant = %v, want JD", vals)
 	}
 }
 
-func TestPrepareBody_RequestIdGenerated(t *testing.T) {
+func TestHeaders_UserAgent(t *testing.T) {
 	c := NewClient("k", "u")
-	body := c.prepareBody(map[string]interface{}{})
-	if body["requestId"] == nil || body["requestId"].(string) == "" {
-		t.Error("requestId should be auto-generated when not provided")
-	}
-}
-
-func TestPrepareBody_ExistingChatIdPreserved(t *testing.T) {
-	c := NewClient("k", "u")
-	body := c.prepareBody(map[string]interface{}{"chatId": "keep-me"})
-	if got := body["chatId"].(string); got != "keep-me" {
-		t.Errorf("chatId = %q, want %q", got, "keep-me")
-	}
-}
-
-func TestPrepareBody_ExtraFieldsMerged(t *testing.T) {
-	c := NewClient("k", "u")
-	body := c.prepareBody(map[string]interface{}{
-		"model":    "GLM-5",
-		"stream":   true,
-		"messages": []string{"hello"},
-	})
-	if body["model"] != "GLM-5" {
-		t.Errorf("extra field model not merged: %v", body["model"])
-	}
-	if body["stream"] != true {
-		t.Errorf("extra field stream not merged: %v", body["stream"])
-	}
-	msgs, ok := body["messages"].([]string)
-	if !ok || len(msgs) != 1 || msgs[0] != "hello" {
-		t.Errorf("extra field messages not merged correctly: %v", body["messages"])
+	h := c.headers()
+	if ua := h.Get("User-Agent"); ua != "node" {
+		t.Errorf("User-Agent = %q, want %q", ua, "node")
 	}
 }
 
@@ -194,6 +165,83 @@ func TestNewHexID_Uniqueness(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Color Gateway signing tests
+// ---------------------------------------------------------------------------
+
+func TestColorGatewaySign(t *testing.T) {
+	// Verify HMAC-SHA256 algorithm against captured mitmproxy flow data.
+	tests := []struct {
+		name     string
+		signStr  string
+		expected string
+	}{
+		{
+			name:     "modelList",
+			signStr:  "joycode_ide&joycode_modelList&1781629681134",
+			expected: "469fe1b57c53995da45f01656713a6bc40b1e50cb930e1d47d0b7f2908a8f71c",
+		},
+		{
+			name:     "chat_completions",
+			signStr:  "joycode_ide&chat_completions&1781631584594",
+			expected: "2956521680734ae9d1316c0751b5b5f0744cc1533782fe04c2cc21fef3e7dae4",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mac := hmac.New(sha256.New, []byte(ColorSecret))
+			mac.Write([]byte(tt.signStr))
+			got := hex.EncodeToString(mac.Sum(nil))
+			if got != tt.expected {
+				t.Errorf("HMAC-SHA256(%q) = %s, want %s", tt.signStr, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestColorGatewayURL_ContainsRequiredParams(t *testing.T) {
+	url := ColorGatewayURL(FnChatComplete)
+
+	if !strings.HasPrefix(url, ColorGateway+ColorAPIPath+"?") {
+		t.Errorf("URL should start with %s%s?, got %s", ColorGateway, ColorAPIPath, url)
+	}
+	if !strings.Contains(url, "appid="+ColorAppID) {
+		t.Errorf("URL should contain appid=%s, got %s", ColorAppID, url)
+	}
+	if !strings.Contains(url, "functionId="+FnChatComplete) {
+		t.Errorf("URL should contain functionId=%s, got %s", FnChatComplete, url)
+	}
+	if !strings.Contains(url, "t=") {
+		t.Error("URL should contain t= timestamp param")
+	}
+	if !strings.Contains(url, "sign=") {
+		t.Error("URL should contain sign= param")
+	}
+}
+
+func TestEndpointToFunctionID(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		want     string
+	}{
+		{"/api/saas/openai/v1/chat/completions", FnChatComplete},
+		{"/api/saas/anthropic/v1/messages", FnChatComplete},
+		{"/api/saas/models/v1/modelList", FnModelList},
+		{"/api/saas/user/v1/userInfo", FnUserInfo},
+		{"/api/saas/openai/v1/web-search", FnWebSearch},
+		{"/api/saas/openai/v1/rerank", FnRerank},
+		{"/api/unknown/endpoint", "unknown/endpoint"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			got := endpointToFunctionID(tt.endpoint)
+			if got != tt.want {
+				t.Errorf("endpointToFunctionID(%q) = %q, want %q", tt.endpoint, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Client.Post tests
 // ---------------------------------------------------------------------------
 
@@ -208,7 +256,7 @@ func TestClient_Post_Success(t *testing.T) {
 	}))
 	defer cleanup()
 
-	got, err := c.Post("/api/test", map[string]interface{}{"q": "hi"})
+	got, err := c.Post("/api/saas/user/v1/userInfo", map[string]interface{}{"q": "hi"})
 	if err != nil {
 		t.Fatalf("Post() error: %v", err)
 	}
@@ -223,7 +271,7 @@ func TestClient_Post_ServerError(t *testing.T) {
 	}))
 	defer cleanup()
 
-	_, err := c.Post("/api/test", nil)
+	_, err := c.Post("/api/saas/user/v1/userInfo", nil)
 	if err == nil {
 		t.Fatal("Post() should return error on 500")
 	}
@@ -239,7 +287,7 @@ func TestClient_Post_InvalidJSON(t *testing.T) {
 	}))
 	defer cleanup()
 
-	_, err := c.Post("/api/test", nil)
+	_, err := c.Post("/api/saas/user/v1/userInfo", nil)
 	if err == nil {
 		t.Fatal("Post() should return error on invalid JSON")
 	}
@@ -263,7 +311,7 @@ func TestClient_Post_GzipResponse(t *testing.T) {
 	}))
 	defer cleanup()
 
-	got, err := c.Post("/api/test", nil)
+	got, err := c.Post("/api/saas/user/v1/userInfo", nil)
 	if err != nil {
 		t.Fatalf("Post() error: %v", err)
 	}
@@ -283,7 +331,7 @@ func TestClient_PostStream_Success(t *testing.T) {
 	}))
 	defer cleanup()
 
-	resp, err := c.PostStream("/api/test", nil)
+	resp, err := c.PostStream("/api/saas/openai/v1/chat/completions", nil)
 	if err != nil {
 		t.Fatalf("PostStream() error: %v", err)
 	}
@@ -300,7 +348,7 @@ func TestClient_PostStream_ServerError(t *testing.T) {
 	}))
 	defer cleanup()
 
-	_, err := c.PostStream("/api/test", nil)
+	_, err := c.PostStream("/api/saas/openai/v1/chat/completions", nil)
 	if err == nil {
 		t.Fatal("PostStream() should return error on 502")
 	}
@@ -527,7 +575,7 @@ func TestClient_Rerank_Success(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Table-driven: doPost sends correct method, path, headers, and body
+// Table-driven: doPost sends correct method, path, headers
 // ---------------------------------------------------------------------------
 
 func TestClient_DoPost_SendsCorrectRequest(t *testing.T) {
@@ -536,9 +584,9 @@ func TestClient_DoPost_SendsCorrectRequest(t *testing.T) {
 		endpoint string
 		body     map[string]interface{}
 	}{
-		{"simple", "/api/test", map[string]interface{}{"key": "val"}},
-		{"empty body", "/api/empty", map[string]interface{}{}},
-		{"nested", "/api/nested", map[string]interface{}{"outer": map[string]interface{}{"inner": float64(42)}}},
+		{"simple", "/api/saas/user/v1/userInfo", map[string]interface{}{"key": "val"}},
+		{"empty body", "/api/saas/user/v1/userInfo", map[string]interface{}{}},
+		{"nested", "/api/saas/user/v1/userInfo", map[string]interface{}{"outer": map[string]interface{}{"inner": float64(42)}}},
 	}
 
 	for _, tt := range tests {
@@ -547,15 +595,18 @@ func TestClient_DoPost_SendsCorrectRequest(t *testing.T) {
 				if r.Method != http.MethodPost {
 					t.Errorf("method = %q, want POST", r.Method)
 				}
-				if r.URL.Path != tt.endpoint {
-					t.Errorf("path = %q, want %q", r.URL.Path, tt.endpoint)
-				}
 				ct := r.Header.Get("Content-Type")
 				if ct != "application/json; charset=UTF-8" {
 					t.Errorf("Content-Type = %q, want application/json; charset=UTF-8", ct)
 				}
 				if pk := r.Header.Get("ptKey"); pk != "test-key" {
 					t.Errorf("ptKey = %q, want %q", pk, "test-key")
+				}
+				if lt := r.Header.Get("loginType"); lt != "PIN_JD_CLOUD" {
+					t.Errorf("loginType = %q, want PIN_JD_CLOUD", lt)
+				}
+				if tenant := r.Header.Get("tenant"); tenant != "JD" {
+					t.Errorf("tenant = %q, want JD", tenant)
 				}
 				var got map[string]interface{}
 				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
@@ -571,60 +622,6 @@ func TestClient_DoPost_SendsCorrectRequest(t *testing.T) {
 			defer cleanup()
 
 			_, _ = c.Post(tt.endpoint, tt.body)
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Table-driven: prepareBody with various inputs
-// ---------------------------------------------------------------------------
-
-func TestPrepareBody_Table(t *testing.T) {
-	c := NewClient("k", "user1")
-
-	tests := []struct {
-		name  string
-		extra map[string]interface{}
-		check func(t *testing.T, body map[string]interface{})
-	}{
-		{
-			name:  "defaults only",
-			extra: map[string]interface{}{},
-			check: func(t *testing.T, body map[string]interface{}) {
-				for _, key := range []string{"chatId", "requestId", "sessionId", "tenant"} {
-					if body[key] == nil {
-						t.Errorf("missing default field %q", key)
-					}
-				}
-			},
-		},
-		{
-			name:  "custom chatId and requestId",
-			extra: map[string]interface{}{"chatId": "c1", "requestId": "r1"},
-			check: func(t *testing.T, body map[string]interface{}) {
-				if body["chatId"] != "c1" {
-					t.Errorf("chatId = %v, want c1", body["chatId"])
-				}
-				if body["requestId"] != "r1" {
-					t.Errorf("requestId = %v, want r1", body["requestId"])
-				}
-			},
-		},
-		{
-			name:  "extra fields override defaults",
-			extra: map[string]interface{}{"tenant": "CUSTOM"},
-			check: func(t *testing.T, body map[string]interface{}) {
-				if body["tenant"] != "CUSTOM" {
-					t.Errorf("tenant = %v, want CUSTOM", body["tenant"])
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			body := c.prepareBody(tt.extra)
-			tt.check(t, body)
 		})
 	}
 }
@@ -678,7 +675,7 @@ func TestClient_Validate_NonZeroCodeEmptyMsg(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Post with nil body (prepareBody handles nil map gracefully)
+// Post with nil body
 // ---------------------------------------------------------------------------
 
 func TestClient_Post_NilBody(t *testing.T) {
@@ -687,8 +684,7 @@ func TestClient_Post_NilBody(t *testing.T) {
 	}))
 	defer cleanup()
 
-	body := c.prepareBody(nil)
-	got, err := c.Post("/test", body)
+	got, err := c.Post("/api/saas/user/v1/userInfo", nil)
 	if err != nil {
 		t.Fatalf("Post() error: %v", err)
 	}
@@ -720,7 +716,7 @@ func TestNewHexID_Concurrent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Verify correct Content-Type and Accept-Encoding headers are sent
+// Verify correct Content-Type and headers are sent
 // ---------------------------------------------------------------------------
 
 func TestClient_Post_SendsCorrectHeaders(t *testing.T) {
@@ -737,11 +733,17 @@ func TestClient_Post_SendsCorrectHeaders(t *testing.T) {
 		if ua != UserAgent {
 			t.Errorf("User-Agent = %q, want %q", ua, UserAgent)
 		}
+		if lt := r.Header.Get("loginType"); lt != "PIN_JD_CLOUD" {
+			t.Errorf("loginType = %q, want PIN_JD_CLOUD", lt)
+		}
+		if tenant := r.Header.Get("tenant"); tenant != "JD" {
+			t.Errorf("tenant = %q, want JD", tenant)
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{"code": float64(0)})
 	}))
 	defer cleanup()
 
-	_, _ = c.Post("/test", map[string]interface{}{})
+	_, _ = c.Post("/api/saas/user/v1/userInfo", map[string]interface{}{})
 }
 
 // ---------------------------------------------------------------------------
@@ -794,7 +796,7 @@ func TestClient_Post_VariousStatusCodes(t *testing.T) {
 			}))
 			defer cleanup()
 
-			_, err := c.Post("/test", nil)
+			_, err := c.Post("/api/saas/user/v1/userInfo", nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Post() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -816,7 +818,7 @@ func TestClient_PostStream_ResponseBodyReadable(t *testing.T) {
 	}))
 	defer cleanup()
 
-	resp, err := c.PostStream("/test", nil)
+	resp, err := c.PostStream("/api/saas/openai/v1/chat/completions", nil)
 	if err != nil {
 		t.Fatalf("PostStream() error: %v", err)
 	}

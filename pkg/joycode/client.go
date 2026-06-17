@@ -3,24 +3,36 @@ package joycode
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 )
 
 const (
-	BaseURL       = "https://joycode-api.jd.com"
-	SaasBaseURL   = "http://joycode-api-saas.jd.com"
-	DefaultModel  = "JoyAI-Code"
-	ClientVersion = "2.4.5"
-	UserAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-		"AppleWebKit/537.36 (KHTML, like Gecko) " +
-		"JoyCode/2.4.5 Chrome/133.0.0.0 Electron/35.2.0 Safari/537.36"
+	// Color gateway (api-ai.jd.com) — all authenticated API calls go through this.
+	ColorGateway = "https://api-ai.jd.com"
+	ColorAPIPath = "/api"
+	ColorSecret  = "0691a3f0b37b4a85aeb63ad0fc7db3ed"
+	ColorAppID   = "joycode_ide"
+
+	// Color gateway function IDs.
+	FnUserInfo     = "joycode_userInfo"
+	FnModelList    = "joycode_modelList"
+	FnChatComplete = "chat_completions"
+	FnWebSearch    = "joycode_webSearch"
+	FnRerank       = "joycode_rerank"
+
+	DefaultModel = "JoyAI-Code"
+	UserAgent    = "node"
 )
 
 var Models = []string{
@@ -35,11 +47,63 @@ var Models = []string{
 	"Doubao-Seed-2.0-pro",
 }
 
+// ColorGatewayURL builds a signed URL for the JoyCode color gateway.
+// Params are sorted by key, values joined with "&", then HMAC-SHA256 signed.
+func ColorGatewayURL(functionId string) string {
+	t := time.Now().UnixMilli()
+	params := map[string]string{
+		"appid":      ColorAppID,
+		"functionId": functionId,
+		"t":          fmt.Sprintf("%d", t),
+	}
+
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var vals []string
+	for _, k := range keys {
+		if v := params[k]; v != "" {
+			vals = append(vals, v)
+		}
+	}
+	signStr := strings.Join(vals, "&")
+
+	mac := hmac.New(sha256.New, []byte(ColorSecret))
+	mac.Write([]byte(signStr))
+	sign := hex.EncodeToString(mac.Sum(nil))
+
+	return fmt.Sprintf("%s%s?appid=%s&functionId=%s&t=%d&sign=%s",
+		ColorGateway, ColorAPIPath, ColorAppID, functionId, t, sign)
+}
+
+// endpointToFunctionID maps legacy endpoint paths to color gateway function IDs.
+func endpointToFunctionID(endpoint string) string {
+	switch endpoint {
+	case "/api/saas/openai/v1/chat/completions":
+		return FnChatComplete
+	case "/api/saas/anthropic/v1/messages":
+		return FnChatComplete // unified gateway
+	case "/api/saas/models/v1/modelList":
+		return FnModelList
+	case "/api/saas/user/v1/userInfo":
+		return FnUserInfo
+	case "/api/saas/openai/v1/web-search":
+		return FnWebSearch
+	case "/api/saas/openai/v1/rerank":
+		return FnRerank
+	default:
+		return strings.TrimPrefix(endpoint, "/api/")
+	}
+}
+
 type Client struct {
 	PtKey          string
 	AnthropicPtKey string
 	UserID         string
-	SessionID      string
+	Tenant         string
 	httpClient     *http.Client
 }
 
@@ -62,7 +126,7 @@ func NewClient(ptKey, userID string) *Client {
 	return &Client{
 		PtKey:      ptKey,
 		UserID:     userID,
-		SessionID:  newHexID(),
+		Tenant:     "JD",
 		httpClient: &http.Client{Timeout: 30 * time.Minute},
 	}
 }
@@ -91,16 +155,17 @@ func newHexID() string {
 }
 
 func (c *Client) headers() http.Header {
-	return http.Header{
+	h := http.Header{
 		"Content-Type":    {"application/json; charset=UTF-8"},
 		"ptKey":           {c.PtKey},
-		"loginType":       {"N_PIN_PC"},
+		"loginType":       {"PIN_JD_CLOUD"},
+		"tenant":          {c.Tenant},
 		"User-Agent":      {UserAgent},
 		"Accept":          {"*/*"},
 		"Accept-Encoding": {"gzip, deflate, br"},
-		"Accept-Language": {"zh-CN,zh;q=0.9,en;q=0.8"},
 		"Connection":      {"keep-alive"},
 	}
+	return h
 }
 
 func (c *Client) anthropicHeaders() http.Header {
@@ -112,45 +177,12 @@ func (c *Client) anthropicHeaders() http.Header {
 		"Content-Type":    {"application/json; charset=utf-8"},
 		"ptKey":           {ptKey},
 		"loginType":       {"PIN_JD_CLOUD"},
+		"tenant":          {c.Tenant},
 		"User-Agent":      {UserAgent},
 		"Accept":          {"*/*"},
-		"Accept-Encoding": {"gzip, deflate"},
-		"Accept-Language": {"zh-CN,zh;q=0.9,en;q=0.8"},
+		"Accept-Encoding": {"gzip, deflate, br"},
 		"Connection":      {"keep-alive"},
 	}
-}
-
-func (c *Client) prepareBody(extra map[string]interface{}) map[string]interface{} {
-	body := map[string]interface{}{
-		"tenant": "JOYCODE", "userId": c.UserID,
-		"client": "JoyCode", "clientVersion": ClientVersion,
-		"sessionId": c.SessionID,
-	}
-	if _, ok := extra["chatId"]; !ok {
-		body["chatId"] = newHexID()
-	}
-	if _, ok := extra["requestId"]; !ok {
-		body["requestId"] = newHexID()
-	}
-	for k, v := range extra {
-		body[k] = v
-	}
-	return body
-}
-
-func (c *Client) prepareAnthropicBody(extra map[string]interface{}) map[string]interface{} {
-	body := map[string]interface{}{
-		"tenant":        "JD",
-		"userId":        c.UserID,
-		"client":        "JoyCode",
-		"clientVersion": ClientVersion,
-		"language":      "UNKNOWN",
-		"stream":        true,
-	}
-	for k, v := range extra {
-		body[k] = v
-	}
-	return body
 }
 
 func (c *Client) doPost(endpoint string, body map[string]interface{}) (*http.Response, error) {
@@ -159,7 +191,9 @@ func (c *Client) doPost(endpoint string, body map[string]interface{}) (*http.Res
 		slog.Error("marshal request body", "endpoint", endpoint, "error", err)
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", BaseURL+endpoint, bytes.NewReader(data))
+	functionID := endpointToFunctionID(endpoint)
+	url := ColorGatewayURL(functionID)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
 	if err != nil {
 		slog.Error("create request", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -174,7 +208,9 @@ func (c *Client) doAnthropicPost(endpoint string, body map[string]interface{}) (
 		slog.Error("marshal anthropic request body", "endpoint", endpoint, "error", err)
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", SaasBaseURL+endpoint, bytes.NewReader(data))
+	// Anthropic native endpoint also uses the unified color gateway
+	url := ColorGatewayURL(FnChatComplete)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
 	if err != nil {
 		slog.Error("create anthropic request", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -211,7 +247,7 @@ func decodeStreamBody(resp *http.Response) error {
 }
 
 func (c *Client) Post(endpoint string, body map[string]interface{}) (map[string]interface{}, error) {
-	resp, err := c.doPost(endpoint, c.prepareBody(body))
+	resp, err := c.doPost(endpoint, body)
 	if err != nil {
 		slog.Error("upstream request failed", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -221,7 +257,8 @@ func (c *Client) Post(endpoint string, body map[string]interface{}) (map[string]
 		slog.Error("decode upstream response", "endpoint", endpoint, "status", resp.StatusCode, "error", err)
 		return nil, err
 	}
-	if resp.StatusCode != 200 {
+	// Color gateway may return status_code 0 as success
+	if resp.StatusCode != 0 && resp.StatusCode != 200 {
 		slog.Error("upstream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
 	}
@@ -234,12 +271,13 @@ func (c *Client) Post(endpoint string, body map[string]interface{}) (map[string]
 }
 
 func (c *Client) PostStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	resp, err := c.doPost(endpoint, c.prepareBody(body))
+	resp, err := c.doPost(endpoint, body)
 	if err != nil {
 		slog.Error("upstream stream connect", "endpoint", endpoint, "error", err)
 		return nil, err
 	}
-	if resp.StatusCode != 200 {
+	// Color gateway may return status_code 0 as success
+	if resp.StatusCode != 0 && resp.StatusCode != 200 {
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(resp.Body)
 		slog.Error("upstream stream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
@@ -253,12 +291,12 @@ func (c *Client) PostStream(endpoint string, body map[string]interface{}) (*http
 }
 
 func (c *Client) PostAnthropicStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	resp, err := c.doAnthropicPost(endpoint, c.prepareAnthropicBody(body))
+	resp, err := c.doAnthropicPost(endpoint, body)
 	if err != nil {
 		slog.Error("upstream anthropic stream connect", "endpoint", endpoint, "error", err)
 		return nil, err
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != 0 && resp.StatusCode != 200 {
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(resp.Body)
 		slog.Error("upstream anthropic stream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))

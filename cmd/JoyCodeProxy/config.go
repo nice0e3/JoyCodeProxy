@@ -44,7 +44,7 @@ var configCmd = &cobra.Command{
 		// API
 		fmt.Println()
 		fmt.Println("  API:")
-		fmt.Printf("    Base URL:       %s\n", joycode.BaseURL)
+		fmt.Printf("    Gateway:        %s\n", joycode.ColorGateway)
 		fmt.Printf("    Default Model:  %s\n", joycode.DefaultModel)
 
 		// Server

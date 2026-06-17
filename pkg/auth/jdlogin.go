@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vibe-coding-labs/JoyCodeProxy/pkg/joycode"
 )
 
 func minInt(a, b int) int {
@@ -363,21 +364,20 @@ func buildLoginResult(ptKey, ptPin string) (*QRLoginResult, error) {
 }
 
 func fetchUserInfoWithPtKey(ptKey string) (map[string]interface{}, error) {
-	body := map[string]interface{}{
-		"tenant": "JOYCODE", "userId": "",
-		"client": "JoyCode", "clientVersion": "2.4.5",
-		"sessionId": "qr-login-session",
-	}
+	body := map[string]interface{}{}
 	data, _ := json.Marshal(body)
-	req, err := http.NewRequest("POST", "https://joycode-api.jd.com/api/saas/user/v1/userInfo", strings.NewReader(string(data)))
+	req, err := http.NewRequest("POST", joycode.ColorGatewayURL(joycode.FnUserInfo), strings.NewReader(string(data)))
 	if err != nil {
 		return nil, err
 	}
 	req.Header = http.Header{
 		"Content-Type": {"application/json; charset=UTF-8"},
 		"ptKey":        {ptKey},
-		"loginType":    {"N_PIN_PC"},
-		"User-Agent":   {"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) JoyCode/2.4.5 Chrome/133.0.0.0 Electron/35.2.0 Safari/537.36"},
+		"loginType":    {"PIN_JD_CLOUD"},
+		"tenant":       {"JD"},
+		"User-Agent":   {joycode.UserAgent},
+		"Accept":       {"*/*"},
+		"Connection":   {"keep-alive"},
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

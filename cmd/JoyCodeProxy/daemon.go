@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -252,24 +253,25 @@ func tailDaemonLogs(n int) error {
 }
 
 // runAsDaemonChild redirects logs to daemon log file with rotation.
+// Child uses "serve" prefix instead of "daemon" to avoid file conflicts with supervisor.
 func runAsDaemonChild() {
 	home, _ := os.UserHomeDir()
-	logDir := filepath.Join(home, logDir)
-	cfg := logrot.DefaultConfig(logDir, "daemon")
+	fullLogDir := filepath.Join(home, logDir)
+	cfg := logrot.DefaultConfig(fullLogDir, "serve")
 	rw, err := logrot.New(cfg)
 	if err != nil {
 		log.Fatalf("[daemon] cannot open log file: %v", err)
 	}
 	log.SetOutput(rw)
 	slog.SetDefault(slog.New(slog.NewTextHandler(rw, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	log.Printf("[daemon] child process started (PID %d)", os.Getpid())
+	log.Printf("[daemon-child] serve process started (PID %d)", os.Getpid())
 }
 
 // RunSupervisor starts a supervisor loop that spawns and monitors the child process.
 func RunSupervisor(port int) {
 	home, _ := os.UserHomeDir()
-	logDir := filepath.Join(home, logDir)
-	cfg := logrot.DefaultConfig(logDir, "daemon")
+	fullLogDir := filepath.Join(home, logDir)
+	cfg := logrot.DefaultConfig(fullLogDir, "daemon")
 	rw, err := logrot.New(cfg)
 	if err != nil {
 		log.Fatalf("[supervisor] cannot open log: %v", err)
@@ -306,8 +308,18 @@ func RunSupervisor(port int) {
 			args = append(args, "--skip-validation")
 		}
 
+		// Build child environment: inherit parent env but REMOVE supervisor marker
+		// to prevent infinite fork bomb (child must not think it's a supervisor)
+		childEnv := make([]string, 0, len(os.Environ())+1)
+		for _, e := range os.Environ() {
+			if !strings.HasPrefix(e, daemonSupervisorEnv+"=") {
+				childEnv = append(childEnv, e)
+			}
+		}
+		childEnv = append(childEnv, daemonChildEnv+"=1")
+
 		cmd := exec.Command(binPath, args...)
-		cmd.Env = append(os.Environ(), daemonChildEnv+"=1")
+		cmd.Env = childEnv
 		cmd.Stdout = rw
 		cmd.Stderr = rw
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
